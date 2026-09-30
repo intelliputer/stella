@@ -15,6 +15,9 @@
 // this file, and for a DISCLAIMER OF ALL WARRANTIES.
 //============================================================================
 
+#include <algorithm>
+#include <charconv>
+#include <fstream>
 #include <random>
 
 #include "bspf.hxx"
@@ -49,6 +52,7 @@
 #include "Settings.hxx"
 #include "PropsSet.hxx"
 #include "EventHandler.hxx"
+#include "jsonDefinitions.hxx"
 #include "PNGLibrary.hxx"
 #include "JPGLibrary.hxx"
 #include "Console.hxx"
@@ -102,6 +106,82 @@ OSystem::OSystem()
   myPropSet = std::make_unique<PropertiesSet>();
 
   Logger::instance().setLogParameters(Logger::Level::MAX, false);
+}
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+string OSystem::loadInputScript(const FSNode& script)
+{
+  std::ifstream input{script.getPath()};
+  if(!input)
+    return std::format("ERROR: Couldn't open input script '{}'", script.getPath());
+
+  try
+  {
+    nlohmann::json events;
+    input >> events;
+    if(!events.is_array())
+      return "ERROR: Input script must contain a JSON array";
+
+    std::vector<InputEvent> loaded;
+    for(const auto& item : events)
+    {
+      InputEvent event{
+        .frame = item.at("frame").get<uInt32>(),
+        .event = item.at("event").get<Event::Type>(),
+        .value = item.value("value", 1)
+      };
+      if(event.event == Event::NoType)
+        return "ERROR: Input script contains an unknown event";
+      loaded.emplace_back(event);
+    }
+    std::sort(loaded.begin(), loaded.end(), [](const InputEvent& lhs, const InputEvent& rhs) {
+      return lhs.frame < rhs.frame;
+    });
+    myInputEvents = std::move(loaded);
+    myNextInputEvent = 0;
+    myInputFrame = 0;
+  }
+  catch(const std::exception& e)
+  {
+    return std::format("ERROR: Couldn't parse input script '{}': {}", script.getPath(), e.what());
+  }
+
+  return {};
+}
+
+string OSystem::setMemoryAssertion(string_view assertion)
+{
+  const size_t equals = assertion.find('=');
+  if(equals == string_view::npos)
+    return "ERROR: -assertmemory must use ADDRESS=VALUE (for example, 9d=bf)";
+
+  const auto parseHex = [](string_view text, uInt32& value) {
+    if(text.starts_with("0x")) text.remove_prefix(2);
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value, 16);
+    return error == std::errc{} && end == text.data() + text.size();
+  };
+
+  uInt32 address = 0;
+  uInt32 value = 0;
+  if(!parseHex(assertion.substr(0, equals), address) ||
+     !parseHex(assertion.substr(equals + 1), value) || address > 0xffff || value > 0xff)
+    return "ERROR: -assertmemory expects hexadecimal ADDRESS=VALUE (for example, 9d=bf)";
+
+  myMemoryAssertionAddress = uInt16(address);
+  myMemoryAssertionValue = uInt8(value);
+  myMemoryAssertionPassed = true;
+  myHasMemoryAssertion = true;
+  return "";
+}
+
+string OSystem::setTelemetryFile(const FSNode& file)
+{
+  myTelemetry.close();
+  myTelemetry.open(file.getPath(), std::ios::out | std::ios::trunc);
+  if(!myTelemetry)
+    return std::format("ERROR: Couldn't create telemetry file '{}'", file.getPath());
+
+  return {};
 }
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -1072,14 +1152,45 @@ void OSystem::mainLoop()
 
     if (myEventHandler->state() == EventHandlerState::EMULATION)
     {
+      while(myNextInputEvent < myInputEvents.size()
+            && myInputEvents[myNextInputEvent].frame <= myInputFrame)
+      {
+        const InputEvent& event = myInputEvents[myNextInputEvent++];
+        myEventHandler->handleEvent(event.event, event.value);
+      }
+
       // Dispatch emulation and render frame (if applicable)
       timesliceSeconds = dispatchEmulation(emulationWorker);
+
+      if(myTelemetry)
+      {
+        System& system = myConsole->system();
+        myTelemetry << std::format(
+          R"({{"frame":{},"room":{},"player_x":{},"player_y":{},"carried_object":{}}})" "\n",
+          myInputFrame, system.peek(0x8a), system.peek(0x8b), system.peek(0x8c), system.peek(0x9d));
+      }
+
+    #ifdef IMAGE_SUPPORT
+      if(myKeyframeInterval > 0 && myInputFrame > 0 && myInputFrame % myKeyframeInterval == 0)
+        myPNGLib->takeSnapshot(myInputFrame);
+    #endif
+      ++myInputFrame;
     #ifdef IMAGE_SUPPORT
       if(mySnapshotFrames > 0) [[unlikely]]
       {
         if(--mySnapshotFrames == 0)
         {
-          myPNGLib->takeSnapshot();
+          if(myHasMemoryAssertion)
+          {
+            const uInt8 actual = myConsole->system().peek(myMemoryAssertionAddress);
+            myMemoryAssertionPassed = actual == myMemoryAssertionValue;
+            if(!myMemoryAssertionPassed)
+              Logger::error("ERROR: memory assertion failed; actual value is " + std::to_string(actual) +
+                ", player room/x/y is " + std::to_string(myConsole->system().peek(0x8a)) + "/" +
+                std::to_string(myConsole->system().peek(0x8b)) + "/" +
+                std::to_string(myConsole->system().peek(0x8c)));
+          }
+          myPNGLib->takeSnapshot(myInputFrame);
           myQuitLoop = true;
         }
       }

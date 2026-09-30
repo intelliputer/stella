@@ -89,7 +89,7 @@ void parseCommandLine(int ac, const char* const av[],
         cerr << "Missing argument for '" << key << "'\n";
         continue;
       }
-      if(key == "basedir" || key == "break")
+      if(key == "basedir" || key == "break" || key == "inputscript" || key == "snapshotframes" || key == "assertmemory" || key == "telemetry" || key == "keyframeinterval")
         localOpts[key] = av[i];
       else
         globalOpts[key] = av[i];
@@ -296,6 +296,55 @@ int main(int ac, char* av[])
 
       if(localBool("takesnapshot"))
         theOSystem->setSnapshotAfterFrames(30);
+
+      if(const auto it = localOpts.find("snapshotframes"); it != localOpts.end())
+      {
+        const Int32 frames = it->second.toInt();
+        if(frames <= 0)
+        {
+          Logger::error("ERROR: -snapshotframes must be greater than zero");
+          return Cleanup(1);
+        }
+        theOSystem->setSnapshotAfterFrames(uInt32(frames));
+      }
+
+      if(const auto it = localOpts.find("inputscript"); it != localOpts.end())
+      {
+        if(const string error = theOSystem->loadInputScript(FSNode(it->second.toString())); !error.empty())
+        {
+          Logger::error(error);
+          return Cleanup(1);
+        }
+      }
+
+      if(const auto it = localOpts.find("assertmemory"); it != localOpts.end())
+      {
+        if(const string error = theOSystem->setMemoryAssertion(it->second.toString()); !error.empty())
+        {
+          Logger::error(error);
+          return Cleanup(1);
+        }
+      }
+
+      if(const auto it = localOpts.find("telemetry"); it != localOpts.end())
+      {
+        if(const string error = theOSystem->setTelemetryFile(FSNode(it->second.toString())); !error.empty())
+        {
+          Logger::error(error);
+          return Cleanup(1);
+        }
+      }
+
+      if(const auto it = localOpts.find("keyframeinterval"); it != localOpts.end())
+      {
+        const Int32 frames = it->second.toInt();
+        if(frames <= 0)
+        {
+          Logger::error("ERROR: -keyframeinterval must be greater than zero");
+          return Cleanup(1);
+        }
+        theOSystem->setKeyframeInterval(uInt32(frames));
+      }
     }
     catch(const std::runtime_error& e)
     {
@@ -322,6 +371,6 @@ int main(int ac, char* av[])
   Logger::debug("Finished main loop ...");
 
   // Cleanup time ...
-  return Cleanup();
+  return Cleanup(theOSystem->validationPassed() ? 0 : 1);
 }
 // NOLINTEND(bugprone-exception-escape)

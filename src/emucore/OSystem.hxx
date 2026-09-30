@@ -49,9 +49,12 @@ class AudioSettings;
 #endif
 
 #include <chrono>
+#include <fstream>
 #include <optional>
+#include <vector>
 
 #include "FSNode.hxx"
+#include "Event.hxx"
 #include "FrameBufferConstants.hxx"
 #include "EventHandlerConstants.hxx"
 #include "FpsMeter.hxx"
@@ -461,6 +464,17 @@ class OSystem
     void setSnapshotAfterFrames(uInt32 frames) { mySnapshotFrames = frames; }
 
     /**
+      Load frame-indexed controller events for deterministic emulation runs.
+
+      @return Empty on success, otherwise a human-readable error.
+    */
+    string loadInputScript(const FSNode& script);
+    string setMemoryAssertion(string_view assertion);
+    string setTelemetryFile(const FSNode& file);
+    void setKeyframeInterval(uInt32 frames) { myKeyframeInterval = frames; }
+    bool validationPassed() const { return myMemoryAssertionPassed; }
+
+    /**
       Reset FPS measurement.
     */
     void resetFps();
@@ -614,6 +628,21 @@ class OSystem
 
     // When non-zero, take a snapshot after this many emulation frames then quit
     uInt32 mySnapshotFrames{0};
+
+    struct InputEvent {
+      uInt32 frame{0};
+      Event::Type event{Event::NoType};
+      Int32 value{0};
+    };
+    std::vector<InputEvent> myInputEvents;
+    size_t myNextInputEvent{0};
+    uInt32 myInputFrame{0};
+    bool myHasMemoryAssertion{false};
+    bool myMemoryAssertionPassed{true};
+    uInt16 myMemoryAssertionAddress{0};
+    uInt8 myMemoryAssertionValue{0};
+    std::ofstream myTelemetry;
+    uInt32 myKeyframeInterval{0};
 
   private:
     FSNode myBaseDir, myStateDir, mySnapshotSaveDir, mySnapshotLoadDir,
